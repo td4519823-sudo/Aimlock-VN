@@ -1,1 +1,240 @@
 
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager") -- Thư viện giả lập click thực tế
+
+local localPlayer = Players.LocalPlayer
+local playerGui = localPlayer:WaitForChild("PlayerGui")
+
+----------------------------------------------------------------
+-- 1. KHỞI TẠO GIAO DIỆN MENU GUI
+----------------------------------------------------------------
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "AutoTargetGui"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = playerGui
+
+local dragFrame = Instance.new("Frame")
+dragFrame.Name = "DragFrame"
+dragFrame.Size = UDim2.new(0, 160, 0, 80)
+dragFrame.Position = UDim2.new(0.1, 0, 0.2, 0)
+dragFrame.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+dragFrame.BorderSizePixel = 0
+dragFrame.Active = true
+dragFrame.Parent = screenGui
+
+local dragCorner = Instance.new("UICorner")
+dragCorner.CornerRadius = UDim.new(0, 8)
+dragCorner.Parent = dragFrame
+
+local toggleButton = Instance.new("TextButton")
+toggleButton.Name = "ToggleButton"
+toggleButton.Size = UDim2.new(0, 140, 0, 50)
+toggleButton.Position = UDim2.new(0, 10, 0, 15)
+toggleButton.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleButton.Font = Enum.Font.SourceSansBold
+toggleButton.TextSize = 16
+toggleButton.Text = "AUTO: TẮT"
+toggleButton.Parent = dragFrame
+
+local buttonCorner = Instance.new("UICorner")
+buttonCorner.CornerRadius = UDim.new(0, 6)
+buttonCorner.Parent = toggleButton
+
+----------------------------------------------------------------
+-- 2. LOGIC KÉO THẢ DI CHUYỂN MENU
+----------------------------------------------------------------
+local dragging = false
+local dragInput, dragStart, startPos
+
+local function updateInput(input)
+	local delta = input.Position - dragStart
+	dragFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+end
+
+dragFrame.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = true
+		dragStart = input.Position
+		startPos = dragFrame.Position
+		
+		input.Changed:Connect(function()
+			if input.UserInputState == Enum.UserInputState.End then
+				dragging = false
+			end
+		end)
+	end
+end)
+
+dragFrame.InputChanged:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+		dragInput = input
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if input == dragInput and dragging then
+		updateInput(input)
+	end
+end)
+
+----------------------------------------------------------------
+-- 3. LOGIC XỬ LÝ AUTO BAY + CLICK TỌA ĐỘ NÚT ĐÁNH
+----------------------------------------------------------------
+local MAX_DISTANCE = 1000 
+local FLY_SPEED = 85 
+local SPAWN_POSITION = Vector3.new(-16.24, 21.50, -170.00) 
+
+-- TỌA ĐỘ NÚT ĐÁNH CỦA BẠN
+local BUTTON_X = 666
+local BUTTON_Y = 122
+
+local isAutoTargeting = false
+local currentTarget = nil
+local activeTween = nil
+local needToRespawnTeleport = false 
+
+-- Theo dõi nhân vật khi chết và hồi sinh
+local function setupCharacter(character)
+	local humanoid = character:WaitForChild("Humanoid")
+	needToRespawnTeleport = true 
+	
+	humanoid.Died:Connect(function()
+		if activeTween then activeTween:Cancel() end
+		currentTarget = nil
+	end)
+end
+
+if localPlayer.Character then setupCharacter(localPlayer.Character) end
+localPlayer.CharacterAdded:Connect(setupCharacter)
+
+-- Tìm người chơi gần nhất còn sống trong phạm vi 1000 studs
+local function getNearestLivingPlayer()
+	local character = localPlayer.Character
+	if not character or not character:FindFirstChild("HumanoidRootPart") then return nil, nil end
+	
+	local myRoot = character.HumanoidRootPart
+	local nearestPlayer = nil
+	local shortestDistance = MAX_DISTANCE
+
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player ~= localPlayer and player.Character then
+			local targetRoot = player.Character:FindFirstChild("HumanoidRootPart")
+			local targetHumanoid = player.Character:FindFirstChildOfClass("Humanoid")
+			
+			if targetRoot and targetHumanoid and targetHumanoid.Health > 0 then
+				local distance = (myRoot.Position - targetRoot.Position).Magnitude
+				if distance < shortestDistance then
+					shortestDistance = distance
+					nearestPlayer = player
+				end
+			end
+		end
+	end
+	return nearestPlayer, shortestDistance
+end
+
+-- Hàm thực hiện giả lập click/chạm vào tọa độ nút đánh quy định
+local function clickAttackButton()
+	-- Gửi lệnh nhấn và nhả chuột trái/tay chạm tại đúng tọa độ (666, 122)
+	VirtualInputManager:SendMouseButtonEvent(BUTTON_X, BUTTON_Y, 0, true, game, 1)
+	task.wait(0.01)
+	VirtualInputManager:SendMouseButtonEvent(BUTTON_X, BUTTON_Y, 0, false, game, 1)
+end
+
+-- Vòng lặp tự động bám đuổi, tổ lại vị trí và click đánh
+task.spawn(function()
+	while true do
+		task.wait(0.05) -- Tốc độ spam click nút đánh cực nhanh (0.05 giây một lần)
+		
+		if isAutoTargeting then
+			local character = localPlayer.Character
+			local myRoot = character and character:FindFirstChild("HumanoidRootPart")
+			local myHumanoid = character and character:FindFirstChildOfClass("Humanoid")
+			
+			if not myRoot or (myHumanoid and myHumanoid.Health <= 0) then
+				if activeTween then activeTween:Cancel() end
+				currentTarget = nil
+				continue
+			end
+
+			-- Nếu bản thân chết -> Tự động tổ lại vị trí chỉ định trước khi săn người mới
+			if needToRespawnTeleport then
+				if activeTween then activeTween:Cancel() end
+				myRoot.CFrame = CFrame.new(SPAWN_POSITION)
+				needToRespawnTeleport = false 
+				task.wait(0.3) -- Đợi server ổn định vị trí mới
+				continue
+			end
+
+			-- Kiểm tra trạng thái mục tiêu hiện tại
+			local isTargetValid = false
+			if currentTarget and currentTarget.Character then
+				local tRoot = currentTarget.Character:FindFirstChild("HumanoidRootPart")
+				local tHumanoid = currentTarget.Character:FindFirstChildOfClass("Humanoid")
+				if tRoot and tHumanoid and tHumanoid.Health > 0 then
+					local dist = (myRoot.Position - tRoot.Position).Magnitude
+					if dist <= MAX_DISTANCE then
+						isTargetValid = true
+					end
+				end
+			end
+
+			-- Tự động chuyển mục tiêu mới khi đối thủ chết hoặc ra khỏi tầm 1000 studs
+			if not isTargetValid then
+				if activeTween then activeTween:Cancel() end
+				local nextPlayer, distance = getNearestLivingPlayer()
+				if nextPlayer then
+					currentTarget = nextPlayer
+				else
+					currentTarget = nil
+				end
+			end
+
+			-- Di chuyển áp sát kẻ địch và bấm nút đánh liên tục
+			if currentTarget and currentTarget.Character then
+				local tRoot = currentTarget.Character:FindFirstChild("HumanoidRootPart")
+				if tRoot and myRoot then
+					local distance = (myRoot.Position - tRoot.Position).Magnitude
+					local duration = distance / FLY_SPEED
+					if duration < 0.05 then duration = 0.05 end
+					
+					-- Camera hướng thẳng về kẻ địch giúp các đòn đánh định hướng chuẩn xác
+					local camera = workspace.CurrentCamera
+					if camera then
+						camera.CFrame = CFrame.new(camera.CFrame.Position, tRoot.Position)
+					end
+					
+					-- Bay sát rạt đối thủ (cách 1.5 studs)
+					local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Linear)
+					local targetCFrame = tRoot.CFrame * CFrame.new(0, 0, 1.5)
+					
+					if activeTween then activeTween:Cancel() end
+					activeTween = TweenService:Create(myRoot, tweenInfo, {CFrame = targetCFrame})
+					activeTween:Play()
+					
+					-- Nhấn nút đấm/đánh khi khoảng cách dưới 15 studs
+					if distance < 15 then
+						clickAttackButton()
+					end
+				end
+			end
+		end
+	end
+end)
+
+-- Sự kiện nhấn nút trên Menu GUI để Bật/Tắt
+toggleButton.MouseButton1Click:Connect(function()
+	isAutoTargeting = not isAutoTargeting
+	if isAutoTargeting then
+		toggleButton.Text = "AUTO: BẬT"
+		toggleButton.BackgroundColor3 = Color3.fromRGB(50, 180, 50)
+	else
+		toggleButton.Text = "AUTO: TẮT"
+		toggleButton.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+		if activeTween then activeTween:Cancel() end
+		currentTarget = nil
+	end
+end)
